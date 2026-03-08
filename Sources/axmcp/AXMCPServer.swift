@@ -59,6 +59,8 @@ final class AXMCPServer: Sendable {
         case "ax_set_value":   return try await setValue(args)
         case "ax_focus":       return try await focusElement(args)
         case "ax_perform_action": return try await performAction(args)
+        case "ax_key":         return try await pressKey(args)
+        case "ax_type":        return try await typeString(args)
         case "ax_get_instructions": return getInstructions()
         case "ax_read_memory":   return try readMemory(args)
         case "ax_write_memory":  return try writeMemory(args)
@@ -257,6 +259,32 @@ final class AXMCPServer: Sendable {
         return [.text("Performed \(action) on [\(snap.role ?? "?")] \"\(label)\" (id=\(snap.id))")]
     }
 
+    private func pressKey(_ args: [String: Value]) async throws -> [Tool.Content] {
+        guard let key = args["key"]?.stringValue else {
+            throw MCPError.invalidParams("key is required")
+        }
+        let (_, pid, appName) = try resolveApp(args)
+        let modifiers: [String]
+        if case .array(let arr) = args["modifiers"] {
+            modifiers = arr.compactMap { $0.stringValue }
+        } else {
+            modifiers = []
+        }
+        try AXWriter.pressKey(pid: pid, key: key, modifiers: modifiers)
+        let modStr = modifiers.isEmpty ? "" : " + modifiers: [\(modifiers.joined(separator: ", "))]"
+        return [.text("Pressed key '\(key)'\(modStr) in \(appName) (PID \(pid))")]
+    }
+
+    private func typeString(_ args: [String: Value]) async throws -> [Tool.Content] {
+        guard let text = args["text"]?.stringValue, !text.isEmpty else {
+            throw MCPError.invalidParams("text is required")
+        }
+        let (_, pid, appName) = try resolveApp(args)
+        let delayMs = args["delay_ms"]?.intValue.map { UInt32($0) } ?? 20
+        try AXWriter.typeText(pid: pid, text: text, delayMs: delayMs)
+        return [.text("Typed \(text.count) character(s) into \(appName) (PID \(pid))")]
+    }
+
     // MARK: - Memory + Instructions Tools
 
     private func getInstructions() -> [Tool.Content] {
@@ -277,6 +305,8 @@ final class AXMCPServer: Sendable {
         ax_set_value | Set text/value on element by ID
         ax_focus | Move keyboard focus to element by ID
         ax_perform_action | Run named AX action (AXShowMenu, AXIncrement, etc.)
+        ax_key | Inject a keyboard event into the app (key + optional modifiers)
+        ax_type | Type a string character by character into the focused field
         ax_get_instructions | Return this protocol (call at session start)
         ax_read_memory | Load persisted knowledge for an app (by bundle_id or app name)
         ax_write_memory | Save new knowledge for an app (overwrites file)
@@ -328,7 +358,7 @@ final class AXMCPServer: Sendable {
         - Electron apps expose minimal AX structure; use menu bar traversal as fallback.
         - AXGroup clusters with no labels = opaque container, do not recurse further.
         - Element IDs reset on every ax_get_tree call — never cache IDs across tool calls if state changed.
-        - wxWidgets apps (PrusaSlicer, etc.) often have fully flat AX trees — deep scan returns same nodes as shallow; tab bars and toolbars are entirely absent.
+        - wxWidgets apps (PrusaSlicer, etc.) often have fully flat AX trees — deep scan returns same nodes as shallow; tab bars and toolbars are entirely absent. Use ax_key for keyboard-based navigation (e.g. Ctrl+1/2/3 to switch tabs).
 
         ## Automation Assessment Report (required output of every explore session)
         After exploring an app, always deliver this report to the user before ending the session:
@@ -608,6 +638,52 @@ final class AXMCPServer: Sendable {
                     "element_id": .object(["type": .string("integer"), "description": .string("Element ID from ax_get_tree or ax_find_elements")]),
                     "action":     .object(["type": .string("string"),  "description": .string("AX action name, e.g. AXPress, AXShowMenu, AXDecrement, AXIncrement, AXConfirm")]),
                 ])
+            ])
+        ),
+
+        Tool(
+            name: "ax_key",
+            description: """
+            Inject a keyboard event into a running app by PID, name, or bundle ID. \
+            Useful for keyboard shortcuts and navigation in apps where AX elements are opaque \
+            (e.g. wxWidgets tab bars, menu shortcuts, modal dismissal).
+
+            key: single character ("a", "1", "/") or named key ("return", "tab", "space", \
+            "escape", "delete", "up", "down", "left", "right", "f1"-"f12").
+            modifiers: array of zero or more: "cmd", "shift", "ctrl", "alt".
+
+            Examples:
+              ax_key(app="PrusaSlicer", key="2", modifiers=["ctrl"])   → switch to tab 2
+              ax_key(app="Safari", key="r", modifiers=["cmd"])          → reload
+              ax_key(app="Finder", key="return")                        → rename selected item
+            """,
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("key")]),
+                "properties": .object(appArgs.merging([
+                    "key": .object(["type": .string("string"), "description": .string("Key to press: single char or named key (return, tab, space, escape, delete, up, down, left, right, f1-f12)")]),
+                    "modifiers": .object(["type": .string("array"), "description": .string("Modifier keys: cmd, shift, ctrl, alt"), "items": .object(["type": .string("string")])]),
+                ], uniquingKeysWith: { $1 }))
+            ])
+        ),
+
+        Tool(
+            name: "ax_type",
+            description: """
+            Type a string into the focused field of an app by injecting unicode keyboard events \
+            for each character. Handles uppercase, symbols, and non-ASCII naturally — no key code \
+            mapping required. Use ax_focus first to focus the target field, then ax_type to enter text.
+
+            Prefer ax_type over ax_set_value when the app uses a custom text control that does \
+            not respond to AXValue writes.
+            """,
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("text")]),
+                "properties": .object(appArgs.merging([
+                    "text":     .object(["type": .string("string"), "description": .string("The string to type into the app")]),
+                    "delay_ms": .object(["type": .string("integer"), "description": .string("Delay in milliseconds between keystrokes (default: 20)")]),
+                ], uniquingKeysWith: { $1 }))
             ])
         ),
 

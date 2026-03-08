@@ -168,6 +168,8 @@ Claude Desktop saves it as a memory. It is injected automatically into every fut
 | `ax_set_value` | Set text/value on an element by ID |
 | `ax_focus` | Move keyboard focus to an element by ID |
 | `ax_perform_action` | Run a named AX action (AXShowMenu, AXIncrement, etc.) |
+| `ax_key` | Inject a keyboard event (key + optional modifiers) |
+| `ax_type` | Type a string character by character into the focused field |
 | `ax_read_memory` | Load persisted AX knowledge for an app |
 | `ax_write_memory` | Save AX knowledge for an app |
 
