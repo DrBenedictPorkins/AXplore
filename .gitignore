@@ -1,0 +1,23 @@
+# Swift build artifacts
+.build/
+.swiftpm/xcworkspace/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+xcuserdata/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Runtime output directories
+/tmp/axplore/
+/tmp/axmcp_screenshots/
+
+# Editor
+.idea/
+*.swp
+*.swo
