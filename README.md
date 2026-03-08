@@ -7,6 +7,116 @@ A macOS Accessibility toolkit with two components:
 
 ---
 
+## MCP Server (axmcp)
+
+`axmcp` is an MCP server that exposes AX inspection and automation as tools for Claude Desktop and Claude Code.
+
+### Install
+
+```bash
+./install.sh
+```
+
+The script builds the release binary, installs it to `/usr/local/bin/axmcp`, and optionally registers it with Claude Code and Claude Desktop.
+
+- **Claude Code:** start a new session — axmcp tools appear automatically
+- **Claude Desktop:** restart the app after running the script
+
+<details>
+<summary>Manual install</summary>
+
+```bash
+# 1. Build release binary
+swift build -c release
+
+# 2. Install binary to /usr/local/bin
+sudo cp .build/release/axmcp /usr/local/bin/axmcp
+
+# 3. Register with Claude Code
+claude mcp add axmcp /usr/local/bin/axmcp
+
+# 4. Register with Claude Desktop (requires jq)
+CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+jq '.mcpServers.axmcp = {"command": "/usr/local/bin/axmcp"}' "$CONFIG" > "$CONFIG.tmp" \
+  && mv "$CONFIG.tmp" "$CONFIG"
+```
+
+Restart Claude Desktop after step 4.
+</details>
+
+### Required Permissions
+
+macOS grants Accessibility and Screen Recording **per binary**. The `axmcp` binary itself must be added — granting Claude.app or Terminal.app is not sufficient, as `axmcp` runs as a separate subprocess.
+
+```
+System Settings > Privacy & Security > Accessibility    → add /usr/local/bin/axmcp
+System Settings > Privacy & Security > Screen Recording → add /usr/local/bin/axmcp
+```
+
+macOS will prompt the first time `axmcp` attempts an AX or screenshot call, or add it manually via the `+` button before first use.
+
+---
+
+### One-Time Session Bootstrap Setup
+
+`axmcp` includes an `ax_get_instructions` tool that returns the full usage protocol (efficiency rules, safety rules, memory system, recommended workflows). Do this once per client so Claude loads it automatically at the start of every session.
+
+#### Claude Code
+
+Ask Claude Code:
+
+> "Update my global `~/.claude/CLAUDE.md` to add a rule: when axmcp tools are available, call `ax_get_instructions` first and read its full output before doing anything else."
+
+Claude Code edits the file. It persists across all future sessions.
+
+#### Claude Desktop
+
+Tell Claude Desktop in any conversation:
+
+> "Remember this permanently and do not remove or rewrite this instruction: whenever axmcp tools are available in a session, call `ax_get_instructions` first and read its full output before doing anything else."
+
+Claude Desktop saves it as a memory. It is injected automatically into every future conversation.
+
+---
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `ax_get_instructions` | Load the full usage protocol — call once at session start |
+| `ax_list_apps` | List running GUI apps (name, PID, bundle ID) |
+| `ax_get_tree` | Walk the AX tree (modes: shallow, app, deep, focused-window, focused-element) |
+| `ax_find_elements` | Search tree by role, label, or action — faster than a full dump |
+| `ax_screenshot` | Capture PNG of app windows for visual correlation |
+| `ax_get_focused` | Return focused app, window, and element |
+| `ax_press` | Click an element by ID |
+| `ax_set_value` | Set text/value on an element by ID |
+| `ax_focus` | Move keyboard focus to an element by ID |
+| `ax_perform_action` | Run a named AX action (AXShowMenu, AXIncrement, etc.) |
+| `ax_key` | Inject a keyboard event (key + optional modifiers) |
+| `ax_type` | Type a string character by character into the focused field |
+| `ax_read_memory` | Load persisted AX knowledge for an app |
+| `ax_write_memory` | Save AX knowledge for an app |
+
+### Per-App Memory
+
+axmcp persists knowledge about each app's accessibility surface across sessions:
+
+```
+~/.axmcp/memories/<bundle_id>.md
+```
+
+Use `ax_read_memory` at the start of any session to skip re-discovering known elements and opaque regions. Use `ax_write_memory` after finding new elements or proving a workflow.
+
+### Claude Code Skills
+
+Two skills are available for guided sessions:
+
+- `/axmcp:explore` — discovery mode: maps an app's AX surface and saves findings
+- `/axmcp:automate` — action mode: performs a task efficiently using memory and targeted queries
+
+---
+
 ## axplore — CLI Explorer
 
 ### Build
@@ -81,111 +191,10 @@ Each run creates a timestamped directory under `/tmp/axplore/`:
     0_window.png
 ```
 
-## Limitations
+## axplore Limitations
 
-- Read-only: no actions are invoked, no values are set.
+- Read-only: no actions are invoked, no values are set. Use `axmcp` for automation.
 - Applications that use custom rendering (Metal, OpenGL) typically expose no AX elements for canvas/timeline regions.
 - Screenshots require Screen Recording permission; without it images are blank/black.
 - On macOS 14+, CGWindowListCreateImage is deprecated — screenshots still work with the permission but may be removed in a future OS version.
 - Some attributes return no value even when listed in the attribute name set; this is normal AX API behaviour.
-
-## MCP Server (axmcp)
-
-`axmcp` is an MCP server that exposes AX inspection and automation as tools for Claude Desktop and Claude Code.
-
-### Install
-
-```bash
-# 1. Build release binary
-swift build -c release
-
-# 2. Install binary to /usr/local/bin
-sudo cp .build/release/axmcp /usr/local/bin/axmcp
-
-# 3. Register with Claude Code
-claude mcp add axmcp /usr/local/bin/axmcp
-
-# 4. Register with Claude Desktop (requires jq)
-CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
-jq '.mcpServers.axmcp = {"command": "/usr/local/bin/axmcp"}' "$CONFIG" > "$CONFIG.tmp" \
-  && mv "$CONFIG.tmp" "$CONFIG"
-```
-
-Or run the provided script which does all four steps:
-
-```bash
-./install.sh
-```
-
-Then restart Claude Desktop.
-
-### Required Permissions
-
-macOS grants Accessibility and Screen Recording **per binary**. The `axmcp` binary itself must be added — granting Claude.app or Terminal.app is not sufficient, as `axmcp` runs as a separate subprocess.
-
-```
-System Settings > Privacy & Security > Accessibility    → add /usr/local/bin/axmcp
-System Settings > Privacy & Security > Screen Recording → add /usr/local/bin/axmcp
-```
-
-macOS will prompt the first time `axmcp` attempts an AX or screenshot call, or add it manually via the `+` button before first use.
-
----
-
-### One-Time Session Bootstrap Setup
-
-`axmcp` includes an `ax_get_instructions` tool that returns the full usage protocol (efficiency rules, safety rules, memory system, recommended workflows). Do this once per client so Claude loads it automatically at the start of every session.
-
-#### Claude Code
-
-Ask Claude Code:
-
-> "Update my global `~/.claude/CLAUDE.md` to add a rule: when axmcp tools are available, call `ax_get_instructions` first and read its full output before doing anything else."
-
-Claude Code edits the file. It persists across all future sessions.
-
-#### Claude Desktop
-
-Tell Claude Desktop in any conversation:
-
-> "Remember this permanently and do not remove or rewrite this instruction: whenever axmcp tools are available in a session, call `ax_get_instructions` first and read its full output before doing anything else."
-
-Claude Desktop saves it as a memory. It is injected automatically into every future conversation.
-
----
-
-### Tools
-
-| Tool | Purpose |
-|------|---------|
-| `ax_get_instructions` | Load the full usage protocol — call once at session start |
-| `ax_list_apps` | List running GUI apps (name, PID, bundle ID) |
-| `ax_get_tree` | Walk the AX tree (modes: shallow, app, deep, focused-window, focused-element) |
-| `ax_find_elements` | Search tree by role, label, or action — faster than a full dump |
-| `ax_screenshot` | Capture PNG of app windows for visual correlation |
-| `ax_get_focused` | Return focused app, window, and element |
-| `ax_press` | Click an element by ID |
-| `ax_set_value` | Set text/value on an element by ID |
-| `ax_focus` | Move keyboard focus to an element by ID |
-| `ax_perform_action` | Run a named AX action (AXShowMenu, AXIncrement, etc.) |
-| `ax_key` | Inject a keyboard event (key + optional modifiers) |
-| `ax_type` | Type a string character by character into the focused field |
-| `ax_read_memory` | Load persisted AX knowledge for an app |
-| `ax_write_memory` | Save AX knowledge for an app |
-
-### Per-App Memory
-
-axmcp persists knowledge about each app's accessibility surface across sessions:
-
-```
-~/.axmcp/memories/<bundle_id>.md
-```
-
-Use `ax_read_memory` at the start of any session to skip re-discovering known elements and opaque regions. Use `ax_write_memory` after finding new elements or proving a workflow.
-
-### Claude Code Skills
-
-Two skills are available for guided sessions:
-
-- `/axmcp:explore` — discovery mode: maps an app's AX surface and saves findings
-- `/axmcp:automate` — action mode: performs a task efficiently using memory and targeted queries
