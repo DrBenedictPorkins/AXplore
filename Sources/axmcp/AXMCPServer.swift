@@ -14,6 +14,11 @@ import Foundation
 /// The registry is refreshed on every tree scan; stale IDs return an error.
 final class AXMCPServer: Sendable {
 
+    // Tracks whether ax_get_instructions has been called this session.
+    // Any tool call before this returns a gate message telling the client to load
+    // the protocol first, then retry. Monotonic false→true; races are harmless.
+    nonisolated(unsafe) private var instructionsLoaded = false
+
     func run() async throws {
         let server = Server(
             name: "axmcp",
@@ -49,6 +54,12 @@ final class AXMCPServer: Sendable {
 
     private func handle(_ params: CallTool.Parameters) async throws -> [Tool.Content] {
         let args = params.arguments ?? [:]
+
+        // Gate: require ax_get_instructions before any other tool.
+        if params.name != "ax_get_instructions" && !instructionsLoaded {
+            return [.text("Call ax_get_instructions first to load the usage protocol, then retry: \(params.name)")]
+        }
+
         switch params.name {
         case "ax_list_apps":   return try listApps()
         case "ax_get_tree":    return try await getTree(args)
@@ -64,6 +75,8 @@ final class AXMCPServer: Sendable {
         case "ax_get_instructions": return getInstructions()
         case "ax_read_memory":   return try readMemory(args)
         case "ax_write_memory":  return try writeMemory(args)
+        case "ax_get_applescript_dictionary": return try getAppleScriptDictionary(args)
+        case "ax_run_applescript": return try runAppleScript(args)
         default:
             throw MCPError.methodNotFound("Unknown tool: \(params.name)")
         }
@@ -288,6 +301,7 @@ final class AXMCPServer: Sendable {
     // MARK: - Memory + Instructions Tools
 
     private func getInstructions() -> [Tool.Content] {
+        instructionsLoaded = true
         let text = """
         # axmcp Usage Protocol
 
@@ -310,14 +324,33 @@ final class AXMCPServer: Sendable {
         ax_get_instructions | Return this protocol (call at session start)
         ax_read_memory | Load persisted knowledge for an app (by bundle_id or app name)
         ax_write_memory | Save new knowledge for an app (overwrites file)
+        ax_get_applescript_dictionary | Return the AppleScript dictionary for a scriptable app
+        ax_run_applescript | Execute an AppleScript and return the result
+
+        ## AppleScript vs AX — When to Use Which
+        These are complementary tools. Use the right one for the job:
+
+        | Situation | Use |
+        |-----------|-----|
+        | App has a scripting dictionary (Safari, Finder, Mail, Terminal, Pages, Numbers, Keynote, Music) | ax_run_applescript |
+        | Need to access app data directly (get tab URLs, list windows, read document content) | ax_run_applescript |
+        | Need to create things (new tab, new document, send mail) | ax_run_applescript |
+        | Third-party app with no scripting support (PrusaSlicer, Filmora, etc.) | AX tools |
+        | Clicking a specific button or filling a form field | AX tools |
+        | App has a dictionary but the action isn't scriptable | AX tools as fallback |
+
+        Call ax_get_applescript_dictionary for ANY app before reaching for AX automation — not just Apple apps.
+        AppleScript accesses the app's data model directly — it's faster, more reliable, and doesn't depend on UI state.
+        If the app has no scripting dictionary or the action isn't scriptable, fall back to AX tools.
 
         ## Efficiency Rules
         1. ALWAYS call ax_read_memory at session start for the target app — skip re-discovering what's already known.
-        2. Use ax_find_elements with a specific query rather than ax_get_tree when the target element is known.
-        3. Use shallow mode first; switch to deep only if shallow didn't reveal the target.
-        4. Opaque regions (many unlabeled AXGroups, zero children, large canvas areas) = do not waste calls on them; use menu bar instead.
-        5. Element IDs are ephemeral — always re-scan before write operations if app state may have changed.
-        6. Prefer ax_find_elements over ax_get_tree when you know what you're looking for.
+        2. Call ax_get_applescript_dictionary for EVERY app before using AX tools — if the action is scriptable, ax_run_applescript is faster and more reliable than AX automation.
+        3. Use ax_find_elements with a specific query rather than ax_get_tree when the target element is known.
+        4. Use shallow mode first; switch to deep only if shallow didn't reveal the target.
+        5. Opaque regions (many unlabeled AXGroups, zero children, large canvas areas) = do not waste calls on them; use menu bar instead.
+        6. Element IDs are ephemeral — always re-scan before write operations if app state may have changed.
+        7. Prefer ax_find_elements over ax_get_tree when you know what you're looking for.
 
         ## Safety Rules
         1. Call ax_screenshot BEFORE and AFTER every write operation (ax_press, ax_set_value).
@@ -338,11 +371,12 @@ final class AXMCPServer: Sendable {
         1. Identify target app (ask user if unclear).
         2. Call ax_read_memory — if memory exists, use it to skip known-opaque regions.
         3. Call ax_list_apps to confirm app is running and get PID.
-        4. Call ax_get_tree(mode="shallow") for initial structural overview.
-        5. Call ax_screenshot to correlate visual UI with AX tree elements.
-        6. For regions of interest, drill with ax_find_elements(query=<role or label>).
-        7. Produce structured report: accessible regions, opaque regions, proven element labels.
-        8. Call ax_write_memory to save findings for future sessions.
+        4. Call ax_get_applescript_dictionary for the app — even non-Apple apps may expose a scripting dictionary. Note which actions are scriptable; prefer ax_run_applescript for those.
+        5. Call ax_get_tree(mode="shallow") for initial structural overview.
+        6. Call ax_screenshot to correlate visual UI with AX tree elements.
+        7. For regions of interest, drill with ax_find_elements(query=<role or label>).
+        8. Produce structured report: accessible regions, opaque regions, scriptable AppleScript actions, proven element labels.
+        9. Call ax_write_memory to save findings (include AppleScript findings) for future sessions.
 
         ## Recommended Workflow — Automate Mode
         1. Call ax_read_memory — use prior knowledge to skip scanning known regions.
@@ -392,9 +426,15 @@ final class AXMCPServer: Sendable {
         return [.text(text)]
     }
 
+    /// Strips leading/trailing slashes from a bundle ID before using it as a filename.
+    /// Some apps (e.g. PrusaSlicer) report a trailing "/" in their bundle ID via NSWorkspace.
+    private func normalizedBundleID(_ bundleID: String) -> String {
+        bundleID.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     private func memoryPath(bundleID: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let safe = bundleID
+        let safe = normalizedBundleID(bundleID)
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "_")
         return "\(home)/.axmcp/memories/\(safe).md"
@@ -420,10 +460,21 @@ final class AXMCPServer: Sendable {
         }
 
         let path = memoryPath(bundleID: bundleID)
-        if let content = try? String(contentsOfFile: path, encoding: .utf8) {
-            return [.text(content)]
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return [.text("No memory found for \(bundleID). Run ax_get_tree and save findings with ax_write_memory.")]
         }
-        return [.text("No memory found for \(bundleID). Run ax_get_tree and save findings with ax_write_memory.")]
+
+        // Verify the bundle ID stored in the file matches what we looked up,
+        // to catch stale files or filename collisions after normalization.
+        let requestedNormalized = normalizedBundleID(bundleID)
+        let storedBundleID = content.components(separatedBy: "\n")
+            .first(where: { $0.hasPrefix("**Bundle ID:**") })
+            .map { $0.replacingOccurrences(of: "**Bundle ID:**", with: "").trimmingCharacters(in: .whitespaces) }
+        if let stored = storedBundleID, normalizedBundleID(stored) != requestedNormalized {
+            return [.text("Warning: memory file bundle ID mismatch. File contains '\(stored)', requested '\(bundleID)'. Verify this is the correct app before using this memory.\n\n\(content)")]
+        }
+
+        return [.text(content)]
     }
 
     private func writeMemory(_ args: [String: Value]) throws -> [Tool.Content] {
@@ -441,6 +492,71 @@ final class AXMCPServer: Sendable {
         let path = memoryPath(bundleID: bundleID)
         try content.write(toFile: path, atomically: true, encoding: .utf8)
         return [.text("Memory saved to \(path)")]
+    }
+
+    // MARK: - AppleScript Tools
+
+    private func getAppleScriptDictionary(_ args: [String: Value]) throws -> [Tool.Content] {
+        let bundlePath: String
+        let appName: String
+
+        if let bid = args["bundle_id"]?.stringValue {
+            if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bid }),
+               let url = app.bundleURL {
+                (bundlePath, appName) = (url.path, app.localizedName ?? bid)
+            } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) {
+                (bundlePath, appName) = (url.path, bid)
+            } else {
+                throw MCPError.invalidParams("No app found for bundle ID '\(bid)'.")
+            }
+        } else if let name = args["app"]?.stringValue {
+            let lower = name.lowercased()
+            guard let app = NSWorkspace.shared.runningApplications
+                .filter({ $0.activationPolicy != .prohibited })
+                .first(where: { $0.localizedName?.lowercased().contains(lower) == true }),
+                  let url = app.bundleURL else {
+                throw MCPError.invalidParams("App '\(name)' not found. Use ax_list_apps to see running apps.")
+            }
+            (bundlePath, appName) = (url.path, app.localizedName ?? name)
+        } else {
+            throw MCPError.invalidParams("Provide app or bundle_id.")
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sdef")
+        process.arguments = [bundlePath]
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        guard !data.isEmpty, process.terminationStatus == 0 else {
+            return [.text("\(appName) has no AppleScript dictionary (not scriptable).")]
+        }
+
+        let parser = SdefParser()
+        let xmlParser = XMLParser(data: data)
+        xmlParser.delegate = parser
+        xmlParser.parse()
+        return [.text(parser.summary(appName: appName))]
+    }
+
+    private func runAppleScript(_ args: [String: Value]) throws -> [Tool.Content] {
+        guard let script = args["script"]?.stringValue, !script.isEmpty else {
+            throw MCPError.invalidParams("script is required")
+        }
+        guard let appleScript = NSAppleScript(source: script) else {
+            throw MCPError.invalidParams("Failed to compile AppleScript.")
+        }
+        var errorDict: NSDictionary?
+        let result = appleScript.executeAndReturnError(&errorDict)
+        if let err = errorDict, let msg = err["NSAppleScriptErrorMessage"] as? String {
+            return [.text("AppleScript error: \(msg)")]
+        }
+        let output = result.stringValue ?? "(no return value)"
+        return [.text(output)]
     }
 
     // MARK: - Helpers
@@ -717,7 +833,144 @@ final class AXMCPServer: Sendable {
                 ])
             ])
         ),
+
+        Tool(
+            name: "ax_get_applescript_dictionary",
+            description: """
+            Return the AppleScript scripting dictionary for a macOS app — the full list of scriptable \
+            classes (with properties) and commands (with parameters and return types). \
+            Use this before ax_run_applescript to discover what the app supports. \
+            Apps without a scripting dictionary (most third-party apps) return a not-scriptable message.
+            """,
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object(appArgs)
+            ])
+        ),
+
+        Tool(
+            name: "ax_run_applescript",
+            description: """
+            Execute an AppleScript and return the result. Use ax_get_applescript_dictionary first \
+            to discover available commands and classes for the target app. \
+            Prefer AppleScript over AX automation for apps with rich scripting dictionaries \
+            (Safari, Finder, Mail, Terminal, Pages, Numbers, Keynote, Music) — it accesses \
+            the app's data model directly rather than simulating UI interactions.
+            """,
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("script")]),
+                "properties": .object([
+                    "script": .object(["type": .string("string"), "description": .string("The AppleScript source to execute")]),
+                ])
+            ])
+        ),
     ]
+}
+
+// MARK: - sdef XML parser
+
+private final class SdefParser: NSObject, XMLParserDelegate {
+    private struct SuiteDef {
+        var name: String
+        var classes: [ClassDef] = []
+        var commands: [CommandDef] = []
+    }
+    private struct ClassDef {
+        var name: String
+        var description: String
+        var properties: [(name: String, type: String, access: String)] = []
+    }
+    private struct CommandDef {
+        var name: String
+        var description: String
+        var params: [(name: String, type: String)] = []
+        var result: String?
+    }
+
+    private var suites: [SuiteDef] = []
+    private var currentSuite: SuiteDef?
+    private var currentClass: ClassDef?
+    private var currentCommand: CommandDef?
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName: String?,
+                attributes: [String: String] = [:]) {
+        switch elementName {
+        case "suite":
+            currentSuite = SuiteDef(name: attributes["name"] ?? "?")
+        case "class" where currentSuite != nil:
+            currentClass = ClassDef(name: attributes["name"] ?? "?",
+                                    description: attributes["description"] ?? "")
+        case "property" where currentClass != nil:
+            currentClass?.properties.append((
+                name:   attributes["name"] ?? "?",
+                type:   attributes["type"] ?? "any",
+                access: attributes["access"] ?? "rw"
+            ))
+        case "command" where currentSuite != nil:
+            currentCommand = CommandDef(name: attributes["name"] ?? "?",
+                                        description: attributes["description"] ?? "")
+        case "parameter" where currentCommand != nil:
+            currentCommand?.params.append((
+                name: attributes["name"] ?? "?",
+                type: attributes["type"] ?? "any"
+            ))
+        case "direct-parameter" where currentCommand != nil:
+            currentCommand?.params.append((name: "_", type: attributes["type"] ?? "any"))
+        case "result" where currentCommand != nil:
+            currentCommand?.result = attributes["type"]
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI: String?, qualifiedName: String?) {
+        switch elementName {
+        case "suite":
+            if let s = currentSuite { suites.append(s) }
+            currentSuite = nil; currentClass = nil; currentCommand = nil
+        case "class":
+            if let c = currentClass { currentSuite?.classes.append(c) }
+            currentClass = nil
+        case "command":
+            if let c = currentCommand { currentSuite?.commands.append(c) }
+            currentCommand = nil
+        default:
+            break
+        }
+    }
+
+    func summary(appName: String) -> String {
+        if suites.isEmpty { return "\(appName) is not scriptable (empty dictionary)." }
+        var lines = ["# AppleScript Dictionary: \(appName)", ""]
+        for suite in suites {
+            lines.append("## \(suite.name)")
+            if !suite.classes.isEmpty {
+                lines.append("### Classes")
+                for cls in suite.classes {
+                    let desc = cls.description.isEmpty ? "" : " — \(cls.description)"
+                    lines.append("**\(cls.name)**\(desc)")
+                    for p in cls.properties {
+                        lines.append("  - \(p.name): \(p.type) [\(p.access)]")
+                    }
+                }
+            }
+            if !suite.commands.isEmpty {
+                lines.append("### Commands")
+                for cmd in suite.commands {
+                    let params = cmd.params.isEmpty ? "" :
+                        "(\(cmd.params.map { "\($0.name): \($0.type)" }.joined(separator: ", ")))"
+                    let result = cmd.result.map { " → \($0)" } ?? ""
+                    let desc   = cmd.description.isEmpty ? "" : " — \(cmd.description)"
+                    lines.append("  **\(cmd.name)**\(params)\(result)\(desc)")
+                }
+            }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 // MARK: - Value helpers

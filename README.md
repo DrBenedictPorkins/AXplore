@@ -1,15 +1,25 @@
 # AXplore
 
-A macOS Accessibility toolkit with two components:
+**Give Claude hands on your Mac.**
 
-- **`axmcp`** — MCP server that exposes AX inspection and automation as tools for Claude Desktop and Claude Code
-- **`axplore`** — read-only CLI for exploring the AX tree of any running macOS application
+`axmcp` is a Model Context Protocol server that turns Claude into a full macOS automation agent. Point it at any running app and Claude can inspect its interface, control it, and script it — without you lifting a finger.
+
+**What Claude can do with axmcp:**
+
+- **Inspect any running app** — walk the full Accessibility tree, read element labels, roles, positions, and available actions; take screenshots for visual confirmation
+- **Control UI directly** — click buttons, fill text fields, toggle checkboxes, trigger menus, drag sliders, inject keyboard shortcuts and modifier combos
+- **Navigate and script Safari** — open URLs, enumerate all open tabs with their titles and URLs, click links via JavaScript, extract full page text and source, execute arbitrary JS on any page
+- **Automate Apple apps via AppleScript** — discover an app's scripting dictionary and run AppleScript against it: list Safari tabs, compose Messages, query Calendar events, automate Finder, run Terminal commands, control Music playback, and more
+- **Work with any macOS app** — native AppKit apps, Electron, wxWidgets, Qt; if it's running, Claude can see it and interact with it through whatever surface it exposes
+- **Persist knowledge across sessions** — per-app memory files record which elements are accessible, which regions are opaque, and which workflows are proven, so Claude skips re-discovery on every session
+
+No browser extension. No screen coordinates. No scripting framework to learn. Just tell Claude what you want done.
+
+This repo also includes `axplore`, a standalone read-only CLI for exploring AX trees from the terminal.
 
 ---
 
 ## MCP Server (axmcp)
-
-`axmcp` is an MCP server that exposes AX inspection and automation as tools for Claude Desktop and Claude Code.
 
 ### Install
 
@@ -97,6 +107,8 @@ Claude Desktop saves it as a memory. It is injected automatically into every fut
 | `ax_type` | Type a string character by character into the focused field |
 | `ax_read_memory` | Load persisted AX knowledge for an app |
 | `ax_write_memory` | Save AX knowledge for an app |
+| `ax_get_applescript_dictionary` | Return an app's AppleScript scripting dictionary (classes, commands, properties) |
+| `ax_run_applescript` | Execute an AppleScript and return the result |
 
 ### Per-App Memory
 
