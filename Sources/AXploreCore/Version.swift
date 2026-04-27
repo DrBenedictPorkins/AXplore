@@ -1,1 +1,1 @@
-public let axmcpVersion = "1.0.0"
+public let axmcpVersion = "1.1.0"
