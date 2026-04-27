@@ -21,7 +21,8 @@ public struct AXploreCommand: ParsableCommand {
           axplore --bundle-id com.wondershare.filmoramacos --mode deep --max-depth 10
           axplore --app Safari --mode focused-window --screenshot
           axplore --app Filmora --search "Export"
-        """
+        """,
+        version: axmcpVersion
     )
 
     // MARK: - Options

@@ -24,9 +24,11 @@ echo "Installing binary to $BINARY..."
 if [[ "$INSTALL_DIR" == /usr/local/bin ]]; then
     sudo cp .build/release/axmcp "$BINARY"
     sudo chmod +x "$BINARY"
+    sudo codesign --force --sign - "$BINARY"
 else
     cp .build/release/axmcp "$BINARY"
     chmod +x "$BINARY"
+    codesign --force --sign - "$BINARY"
 fi
 
 # ── 3. Claude Code ────────────────────────────────────────────────────────────

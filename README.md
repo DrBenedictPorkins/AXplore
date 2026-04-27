@@ -109,6 +109,12 @@ Claude Desktop saves it as a memory. It is injected automatically into every fut
 | `ax_write_memory` | Save AX knowledge for an app |
 | `ax_get_applescript_dictionary` | Return an app's AppleScript scripting dictionary (classes, commands, properties) |
 | `ax_run_applescript` | Execute an AppleScript and return the result |
+| `ax_clipboard_get` | Read the current macOS clipboard contents |
+| `ax_clipboard_set` | Write text to the clipboard |
+| `ax_scroll` | Scroll inside an app window or element (direction, amount, optional element_id) |
+| `ax_wait_for` | Poll until an element matching a query appears (with timeout) |
+| `ax_launch_app` | Launch an app by bundle ID |
+| `ax_quit_app` | Quit a running app gracefully |
 
 ### Per-App Memory
 

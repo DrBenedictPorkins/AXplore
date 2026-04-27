@@ -22,7 +22,7 @@ final class AXMCPServer: Sendable {
     func run() async throws {
         let server = Server(
             name: "axmcp",
-            version: "1.0.0",
+            version: axmcpVersion,
             capabilities: .init(tools: .init())
         )
 
@@ -77,6 +77,12 @@ final class AXMCPServer: Sendable {
         case "ax_write_memory":  return try writeMemory(args)
         case "ax_get_applescript_dictionary": return try getAppleScriptDictionary(args)
         case "ax_run_applescript": return try runAppleScript(args)
+        case "ax_clipboard_get":  return clipboardGet(args)
+        case "ax_clipboard_set":  return try clipboardSet(args)
+        case "ax_scroll":         return try await scroll(args)
+        case "ax_wait_for":       return try await waitFor(args)
+        case "ax_launch_app":     return try await launchApp(args)
+        case "ax_quit_app":       return try quitApp(args)
         default:
             throw MCPError.methodNotFound("Unknown tool: \(params.name)")
         }
@@ -298,6 +304,147 @@ final class AXMCPServer: Sendable {
         return [.text("Typed \(text.count) character(s) into \(appName) (PID \(pid))")]
     }
 
+    // MARK: - Clipboard Tools
+
+    private func clipboardGet(_ args: [String: Value]) -> [Tool.Content] {
+        let pb = NSPasteboard.general
+        if let text = pb.string(forType: .string) {
+            return [.text("Clipboard (\(text.count) chars):\n\(text)")]
+        }
+        let types = pb.types?.map { $0.rawValue }.joined(separator: ", ") ?? "none"
+        return [.text("Clipboard is empty or contains non-text content. Available types: \(types)")]
+    }
+
+    private func clipboardSet(_ args: [String: Value]) throws -> [Tool.Content] {
+        guard let text = args["text"]?.stringValue else {
+            throw MCPError.invalidParams("text is required")
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        return [.text("Clipboard set (\(text.count) chars).")]
+    }
+
+    // MARK: - Scroll Tool
+
+    private func scroll(_ args: [String: Value]) async throws -> [Tool.Content] {
+        let direction = args["direction"]?.stringValue ?? "down"
+        let amount    = args["amount"]?.intValue ?? 3
+        guard ["up", "down", "left", "right"].contains(direction) else {
+            throw MCPError.invalidParams("direction must be: up, down, left, right")
+        }
+
+        var point: CGPoint
+        var desc: String
+
+        if let elementId = args["element_id"]?.intValue {
+            guard let ref = await ElementRegistry.shared.lookup(elementId) else {
+                throw MCPError.invalidParams("element_id \(elementId) not found. Re-run ax_get_tree.")
+            }
+            guard let pos = ref.snapshot.position, let sz = ref.snapshot.size else {
+                throw MCPError.invalidParams("Element id=\(elementId) has no position/size.")
+            }
+            point = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
+            desc  = "element id=\(elementId)"
+        } else {
+            let (axApp, _, appName) = try resolveApp(args)
+            let walker = AXTreeWalker(maxDepth: 1, maxNodes: 1)
+            guard let win = walker.walkFocusedWindow(axApp).first,
+                  let pos = win.position, let sz = win.size else {
+                throw MCPError.invalidParams("Cannot determine scroll target for \(appName). Provide element_id or ensure the app has a focused window.")
+            }
+            point = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
+            desc  = "\(appName) window center (\(Int(point.x)), \(Int(point.y)))"
+        }
+
+        var wheel1: Int32 = 0
+        var wheel2: Int32 = 0
+        switch direction {
+        case "up":    wheel1 =  Int32(amount)
+        case "down":  wheel1 = -Int32(amount)
+        case "left":  wheel2 =  Int32(amount)
+        case "right": wheel2 = -Int32(amount)
+        default:      break
+        }
+
+        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line,
+                                   wheelCount: 2, wheel1: wheel1, wheel2: wheel2, wheel3: 0) else {
+            throw MCPError.invalidParams("Failed to create scroll event.")
+        }
+        event.location = point
+        event.post(tap: .cghidEventTap)
+        return [.text("Scrolled \(direction) \(amount) lines at \(desc).")]
+    }
+
+    // MARK: - Wait Tool
+
+    private func waitFor(_ args: [String: Value]) async throws -> [Tool.Content] {
+        guard let query = args["query"]?.stringValue, !query.isEmpty else {
+            throw MCPError.invalidParams("query is required")
+        }
+        let (axApp, pid, appName) = try resolveApp(args)
+        let timeoutSec = args["timeout"]?.intValue ?? 10
+        let deadline   = Date().addingTimeInterval(Double(timeoutSec))
+
+        while Date() < deadline {
+            let walker = AXTreeWalker(maxDepth: 8, maxNodes: 5000)
+            walker.captureElements = true
+            let roots    = walker.walkAppRoots(axApp)
+            let allNodes = flatten(roots)
+            let matches  = SearchFilter.search(allNodes, query: query)
+
+            if !matches.isEmpty {
+                var entries: [Int: AXElementRef] = [:]
+                for (id, element) in walker.elementTable {
+                    if let snap = allNodes.first(where: { $0.id == id }) {
+                        entries[id] = AXElementRef(element: element, pid: pid, snapshot: snap)
+                    }
+                }
+                await ElementRegistry.shared.store(entries)
+                let m     = matches[0]
+                let label = m.title ?? m.elementDescription ?? "(no label)"
+                return [.text("Found '\(query)' in \(appName): id=\(m.id) [\(m.role ?? "?")] \"\(label)\"")]
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return [.text("Timed out after \(timeoutSec)s — '\(query)' did not appear in \(appName).")]
+    }
+
+    // MARK: - App Lifecycle Tools
+
+    private func launchApp(_ args: [String: Value]) async throws -> [Tool.Content] {
+        guard let bundleID = args["bundle_id"]?.stringValue, !bundleID.isEmpty else {
+            throw MCPError.invalidParams("bundle_id is required")
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            throw MCPError.invalidParams("No application found for bundle ID '\(bundleID)'.")
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        return try await withCheckedThrowingContinuation { continuation in
+            NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    let name = app?.localizedName ?? bundleID
+                    continuation.resume(returning: [.text("Launched \(name) (\(bundleID)).")])
+                }
+            }
+        }
+    }
+
+    private func quitApp(_ args: [String: Value]) throws -> [Tool.Content] {
+        let (_, pid, appName) = try resolveApp(args)
+        guard let app = NSWorkspace.shared.runningApplications
+            .first(where: { $0.processIdentifier == pid }) else {
+            throw MCPError.invalidParams("App \(appName) (PID \(pid)) not found in running applications.")
+        }
+        let ok = app.terminate()
+        return [.text(ok
+            ? "Sent quit signal to \(appName) (PID \(pid))."
+            : "Could not quit \(appName) — app may not support graceful termination."
+        )]
+    }
+
     // MARK: - Memory + Instructions Tools
 
     private func getInstructions() -> [Tool.Content] {
@@ -326,6 +473,12 @@ final class AXMCPServer: Sendable {
         ax_write_memory | Save new knowledge for an app (overwrites file)
         ax_get_applescript_dictionary | Return the AppleScript dictionary for a scriptable app
         ax_run_applescript | Execute an AppleScript and return the result
+        ax_clipboard_get | Read the current clipboard contents
+        ax_clipboard_set | Write text to the clipboard
+        ax_scroll | Scroll inside an app window or element (direction, amount, optional element_id)
+        ax_wait_for | Poll until an element matching query appears (with timeout)
+        ax_launch_app | Launch an app by bundle ID
+        ax_quit_app | Quit a running app gracefully
 
         ## AppleScript vs AX — When to Use Which
         These are complementary tools. Use the right one for the job:
@@ -863,6 +1016,82 @@ final class AXMCPServer: Sendable {
                 "properties": .object([
                     "script": .object(["type": .string("string"), "description": .string("The AppleScript source to execute")]),
                 ])
+            ])
+        ),
+
+        Tool(
+            name: "ax_clipboard_get",
+            description: "Read the current macOS clipboard contents. Returns text, or lists available data types if the clipboard contains non-text data.",
+            inputSchema: .object(["type": .string("object"), "properties": .object([:])])
+        ),
+
+        Tool(
+            name: "ax_clipboard_set",
+            description: "Write text to the macOS clipboard. Combine with ax_key(key='v', modifiers=['cmd']) to paste into an app.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("text")]),
+                "properties": .object([
+                    "text": .object(["type": .string("string"), "description": .string("Text to place on the clipboard")]),
+                ])
+            ])
+        ),
+
+        Tool(
+            name: "ax_scroll",
+            description: """
+            Scroll inside an app window or a specific element. \
+            Provide element_id to target a specific scroll area (from ax_find_elements), \
+            or provide app/bundle_id to scroll the focused window center.
+
+            direction: up, down, left, right (default: down)
+            amount: scroll lines (default: 3)
+            """,
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object(appArgs.merging([
+                    "direction":  .object(["type": .string("string"),  "description": .string("Scroll direction: up, down, left, right (default: down)")]),
+                    "amount":     .object(["type": .string("integer"), "description": .string("Number of scroll lines (default: 3)")]),
+                    "element_id": .object(["type": .string("integer"), "description": .string("Element to scroll at (from ax_get_tree or ax_find_elements)")]),
+                ], uniquingKeysWith: { $1 }))
+            ])
+        ),
+
+        Tool(
+            name: "ax_wait_for",
+            description: """
+            Poll an app's AX tree until an element matching query appears, or until timeout expires. \
+            Use after ax_press to wait for a dialog or result element before continuing. \
+            Returns the matched element ID ready for immediate use in write tools.
+            """,
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("query")]),
+                "properties": .object(appArgs.merging([
+                    "query":   .object(["type": .string("string"),  "description": .string("Text to wait for (role, label, title, or any searchable field)")]),
+                    "timeout": .object(["type": .string("integer"), "description": .string("Max wait in seconds (default: 10)")]),
+                ], uniquingKeysWith: { $1 }))
+            ])
+        ),
+
+        Tool(
+            name: "ax_launch_app",
+            description: "Launch a macOS application by bundle ID. The app must be installed on the system. Use ax_list_apps after launching to confirm the app is running.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("bundle_id")]),
+                "properties": .object([
+                    "bundle_id": .object(["type": .string("string"), "description": .string("Bundle identifier of the app to launch, e.g. com.apple.Safari")]),
+                ])
+            ])
+        ),
+
+        Tool(
+            name: "ax_quit_app",
+            description: "Quit a running macOS application gracefully (equivalent to Cmd+Q). Provide app name, bundle_id, or pid.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object(appArgs)
             ])
         ),
     ]
