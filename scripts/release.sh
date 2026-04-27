@@ -14,7 +14,7 @@ MAJOR=$(echo "$CURRENT" | cut -d. -f1)
 MINOR=$(echo "$CURRENT" | cut -d. -f2)
 PATCH=$(echo "$CURRENT" | cut -d. -f3)
 
-TAG="v${MAJOR}.${MINOR}"
+TAG="RELEASE-${MAJOR}.${MINOR}.${PATCH}"
 
 echo "Current version : $CURRENT"
 echo "Release tag     : $TAG"
@@ -55,5 +55,5 @@ git push origin main
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Released $TAG"
-echo " Next version: $NEXT (working toward v${MAJOR}.${NEXT_MINOR})"
+echo " Next version: $NEXT (working toward RELEASE-${MAJOR}.${NEXT_MINOR}.0)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
